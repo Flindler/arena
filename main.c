@@ -39,7 +39,7 @@ typedef enum {
     MV_OP_SUBSTRACT,
     MV_OP_MATMUL,
     MV_OP_CROSS_ENTROPY,
-} model_var_ops; // type of operations, how the variables are created
+} model_var_op; // type of operations, how the variables are created
 
 
 // where it sits in the enum determines how many inputs, how clever!
@@ -51,7 +51,7 @@ typedef struct model_var{
     u32 flags; // things that modify function
     matrix* val; //matrix for its value
     matrix* grad; //matrix for its gradient
-    model_var_ops op;
+    model_var_op op;
     struct model_var* inputs[MODEL_VAR_MAX_INPUTS]; //contains a pointer to another model var? or its own pointer?
 } model_var;
 
@@ -66,11 +66,11 @@ typedef struct {
 
     u32 num_vars;
 
-    matrix* input;
-    matrix* output;
+    model_var* input;
+    model_var* output;
 
-    matrix* desired_output;
-    matrix* cost;
+    model_var* desired_output;
+    model_var* cost;
 
     model_program forward_prog;
     model_program cost_prog;
@@ -79,9 +79,13 @@ typedef struct {
 
 
 
+model_var* _mv_unary_impl(mem_arena* arena, model_context* model,
+                          model_var* input, u32 flags, model_var_op op,
+                          u32 rows, u32 cols);
+
 model_var* mv_create(
     mem_arena* arena, model_context* model,
-    u32 rows, u32 cols, u32 flags
+    u32 rows, u32 cols, u32 flags, model_var_op op
 );
 
 model_var* mv_relu(
@@ -458,5 +462,86 @@ matrix* mat_load(mem_arena* arena, u32 rows, u32 cols, const char* filename){
     fclose(f);
     return mat;
 }
+
+
+model_var* mv_create(
+    mem_arena* arena, model_context* model,
+    u32 rows, u32 cols, u32 flags, model_var_op op
+){
+    model_var* out= PUSH_STRUCT(arena, model_var);
+    out->index  = model->num_vars ++;
+    out->flags = flags;
+    out->val = mat_create(arena, rows, cols); // our value vector
+    out->op = op; 
+    if (flags & MV_FLAG_REQUIRES_GRAD){
+        out->grad = mat_create(arena, rows, cols); // our gradient vector
+    }
+    if(flags & MV_FLAG_INPUT){model->input = out;} // stores the input for manager
+
+    return out;
+}
+
+/* For unary, create a model variable, using arena model input flags and op, 
+then set the new model var's input to the input. Set gradients correctly */
+model_var* _mv_unary_impl(mem_arena* arena, model_context* model,
+                          model_var* input, u32 flags, model_var_op op,
+                          u32 rows, u32 cols){
+    if (input->flags & MV_FLAG_REQUIRES_GRAD){
+        flags |= MV_FLAG_REQUIRES_GRAD; // also require gradient for future
+    }
+    model_var* out = mv_create(arena, model, rows, cols, flags, op);
+    out->inputs[0] = input; // only one input here
+    return out;
+}
+
+
+model_var* _mv_binary_impl(mem_arena* arena, model_context* model,
+                          model_var* a, model_var* b, u32 flags, model_var_op op,
+                          u32 rows, u32 cols){
+    if ((a->flags & MV_FLAG_REQUIRES_GRAD) || (b->flags & MV_FLAG_REQUIRES_GRAD))
+    {flags |= MV_FLAG_REQUIRES_GRAD;} // also require gradient for future
+
+    model_var* out = mv_create(arena, model, rows, cols, flags, op);
+
+
+    return out;
+
+
+
+model_var* mv_relu(
+    mem_arena* arena, model_context* model,
+    model_var* input, u32 flags
+){
+    return _mv_unary_impl(arena, model, input, input->val->rows, input->val->cols,
+                   flags, MV_OP_RELU);
+}
+
+
+model_var* mv_softmax(
+
+    mem_arena* arena, model_context* model,
+    model_var* input, u32 flags
+){
+    return _mv_unary_impl(arena, model, input, input->val->rows, input->val->cols,
+                   flags, MV_OP_SOFTMAX);
+}
+
+model_var*  mv_add(
+    mem_arena* arena, model_context* model,
+    model_var* a, model_var*b, u32 flags
+);
+
+model_var*  mv_sub(
+    mem_arena* arena, model_context* model,
+    model_var* a, model_var*b, u32 flags
+);
+model_var*  mv_matmul(
+    mem_arena* arena, model_context* model,
+    model_var* a, model_var*b, u32 flags
+);
+model_var*  mv_cross_entropy(
+    mem_arena* arena, model_context* model,
+    model_var* a, model_var*b, u32 flags
+);
 
 
