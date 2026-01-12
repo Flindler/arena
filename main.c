@@ -36,7 +36,7 @@ typedef enum {
     _MV_OP_BINARY_START,
     
     MV_OP_ADD,
-    MV_OP_SUBSTRACT,
+    MV_OP_SUB,
     MV_OP_MATMUL,
     MV_OP_CROSS_ENTROPY,
 } model_var_op; // type of operations, how the variables are created
@@ -478,6 +478,11 @@ model_var* mv_create(
     }
     if(flags & MV_FLAG_INPUT){model->input = out;} // stores the input for manager
 
+    if(flags & MV_FLAG_INPUT){model->input = out;} // stores the input for manager
+    if(flags & MV_FLAG_OUTPUT){model->output = out;} // stores the input for manager
+    if(flags & MV_FLAG_DESIRED_OUTPUT){model->desired_output = out;} // stores the input for manager
+    if(flags & MV_FLAG_COST){model->cost = out;} // stores the input for manager
+
     return out;
 }
 
@@ -502,11 +507,8 @@ model_var* _mv_binary_impl(mem_arena* arena, model_context* model,
     {flags |= MV_FLAG_REQUIRES_GRAD;} // also require gradient for future
 
     model_var* out = mv_create(arena, model, rows, cols, flags, op);
-
-
     return out;
-
-
+}
 
 model_var* mv_relu(
     mem_arena* arena, model_context* model,
@@ -529,19 +531,49 @@ model_var* mv_softmax(
 model_var*  mv_add(
     mem_arena* arena, model_context* model,
     model_var* a, model_var*b, u32 flags
-);
+) {
+        if(a->val->rows != b->val->rows || a->val->cols != b->val->cols) {
+            return NULL;
+        }
+        return _mv_binary_impl(arena, model, a, b, a->val->rows, a->val->cols,
+                               flags, MV_OP_ADD);
+}
 
 model_var*  mv_sub(
     mem_arena* arena, model_context* model,
     model_var* a, model_var*b, u32 flags
-);
+) {
+        if(a->val->rows != b->val->rows || a->val->cols != b->val->cols) {
+            return NULL;
+        }
+        return _mv_binary_impl(arena, model, a, b, a->val->rows, a->val->cols,
+                               flags, MV_OP_SUB);
+}
+
+
+
 model_var*  mv_matmul(
     mem_arena* arena, model_context* model,
     model_var* a, model_var*b, u32 flags
-);
+) {
+        if(a->val->cols != b->val->rows){
+            return NULL;
+        }
+        return _mv_binary_impl(arena, model, a, b, a->val->rows, b->val->cols,
+                               flags, MV_OP_MATMUL);
+}
+
+
 model_var*  mv_cross_entropy(
     mem_arena* arena, model_context* model,
-    model_var* a, model_var*b, u32 flags
-);
+    model_var* p, model_var*q, u32 flags
 
+
+) {
+        if(p->val->rows != q->val->rows || p->val->cols != q->val->cols) {
+            return NULL;
+        }
+        return _mv_binary_impl(arena, model, p, q, p->val->rows, p->val->cols,
+                               flags, MV_OP_CROSS_ENTROPY);
+}
 
