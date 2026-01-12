@@ -14,6 +14,111 @@ typedef struct {
     f32* data;
 } matrix;
 
+typedef enum {
+    MV_FLAG_NONE = 0,
+
+    MV_FLAG_REQUIRES_GRAD  = (1<<0),
+    MV_FLAG_PARAMETER      = (1<<1),
+    MV_FLAG_INPUT          = (1<<2),
+    MV_FLAG_OUTPUT         = (1<<3),
+    MV_FLAG_DESIRED_OUTPUT = (1<<4),
+    MV_FLAG_COST           = (1<<5),
+} model_var_flags;
+
+typedef enum {
+    MV_OP_NULL=0,
+    MV_OP_CREATE,
+    _MV_OP_UNARY_START, // this tells us how many ops involved for gradients
+
+    MV_OP_RELU,
+    MV_OP_SOFTMAX,
+
+    _MV_OP_BINARY_START,
+    
+    MV_OP_ADD,
+    MV_OP_SUBSTRACT,
+    MV_OP_MATMUL,
+    MV_OP_CROSS_ENTROPY,
+} model_var_ops; // type of operations, how the variables are created
+
+
+// where it sits in the enum determines how many inputs, how clever!
+#define MV_NUM_INPUTS(op) ((op) < _MV_OP_UNARY_START ? 0: ((op) <_MV_OP_BINARY_START ? 1 :2)) 
+#define MODEL_VAR_MAX_INPUTS 2
+
+typedef struct model_var{
+    u32 index;  // for indexing operations
+    u32 flags; // things that modify function
+    matrix* val; //matrix for its value
+    matrix* grad; //matrix for its gradient
+    model_var_ops op;
+    struct model_var* inputs[MODEL_VAR_MAX_INPUTS]; //contains a pointer to another model var? or its own pointer?
+} model_var;
+
+
+
+typedef struct {
+    model_var** vars;
+    u32 size;
+} model_program;
+
+typedef struct {
+
+    u32 num_vars;
+
+    matrix* input;
+    matrix* output;
+
+    matrix* desired_output;
+    matrix* cost;
+
+    model_program forward_prog;
+    model_program cost_prog;
+
+} model_context;
+
+
+
+model_var* mv_create(
+    mem_arena* arena, model_context* model,
+    u32 rows, u32 cols, u32 flags
+);
+
+model_var* mv_relu(
+    mem_arena* arena, model_context* model,
+    model_var* input, u32 flags
+);
+
+
+model_var* mv_softmax(
+
+    mem_arena* arena, model_context* model,
+    model_var* input, u32 flags
+);
+
+model_var*  mv_add(
+    mem_arena* arena, model_context* model,
+    model_var* a, model_var*b, u32 flags
+);
+
+model_var*  mv_sub(
+    mem_arena* arena, model_context* model,
+    model_var* a, model_var*b, u32 flags
+);
+model_var*  mv_matmul(
+    mem_arena* arena, model_context* model,
+    model_var* a, model_var*b, u32 flags
+);
+model_var*  mv_cross_entropy(
+    mem_arena* arena, model_context* model,
+    model_var* a, model_var*b, u32 flags
+);
+
+
+
+
+
+
 matrix* mat_create(mem_arena* arena, u32 rows, u32 cols);
 
 void mat_clear(matrix* mat);
@@ -25,6 +130,7 @@ matrix* mat_load(mem_arena* arena, u32 rows, u32 cols, const char* filename);
 b32 mat_add(matrix* out, const matrix*a, const matrix* b); // boolean on success
 f32 mat_sum(matrix* mat); // sums all entries in the matrix
 b32 mat_sub(matrix* out, const matrix*a, const matrix* b); // boolean on success
+
 b32 mat_mul(matrix* out, const matrix*a, const matrix* b,
             b8 zero_out, b8 transpose_a, b8 transpose_b); // boolean on success
 
@@ -165,7 +271,6 @@ b32 mat_add(matrix* out, const matrix*a, const matrix* b){
     if(out-> rows != a->rows || out->cols != a->cols){
         return false;
     }
-
     u64 size = (u64)a->rows * a->cols;
 
 
