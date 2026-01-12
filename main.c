@@ -41,6 +41,21 @@ typedef enum {
     MV_OP_CROSS_ENTROPY,
 } model_var_op; // type of operations, how the variables are created
 
+typedef struct{
+    matrix* train_images;
+    matrix* train_labels;
+    matrix* test_images;
+    matrix* test_labels;
+    
+    u32 epochs;
+    u32 batch_size;
+    u32 learning_rate;
+
+} model_training_desc;
+
+
+
+
 
 // where it sits in the enum determines how many inputs, how clever!
 #define MV_NUM_INPUTS(op) ((op) < _MV_OP_UNARY_START ? 0: ((op) <_MV_OP_BINARY_START ? 1 :2)) 
@@ -85,7 +100,7 @@ model_var* _mv_unary_impl(mem_arena* arena, model_context* model,
 
 model_var* mv_create(
     mem_arena* arena, model_context* model,
-    u32 rows, u32 cols, u32 flags, model_var_op op
+    u32 rows, u32 cols, u32 flags
 );
 
 model_var* mv_relu(
@@ -148,6 +163,20 @@ b32 mat_softmax_add_grad(matrix* out, const matrix* softmax_out);
 b32 mat_cross_entropy_add_grad(matrix* out, const matrix* p, const matrix* q);
 
 void draw_mnist_digit(f32* data);
+
+//out var is who specifies output
+model_program model_prog_create(mem_arena* arena, model_context* model,
+                                model_var* out_var);
+
+void model_prog_compute(model_program* program);
+void model_prog_compute_grads(model_program* program);
+
+
+model_context* model_create(mem_arena* arena);
+void model_compile(mem_arena* arena, model_context* model);
+void model_feedfowrads(model_context* context);
+void model_train(model_context* model,
+                 const model_training_desc* training_desc);
 
 
 
@@ -466,17 +495,16 @@ matrix* mat_load(mem_arena* arena, u32 rows, u32 cols, const char* filename){
 
 model_var* mv_create(
     mem_arena* arena, model_context* model,
-    u32 rows, u32 cols, u32 flags, model_var_op op
+    u32 rows, u32 cols, u32 flags
 ){
     model_var* out= PUSH_STRUCT(arena, model_var);
     out->index  = model->num_vars ++;
     out->flags = flags;
     out->val = mat_create(arena, rows, cols); // our value vector
-    out->op = op; 
+    out->op = MV_OP_CREATE; 
     if (flags & MV_FLAG_REQUIRES_GRAD){
         out->grad = mat_create(arena, rows, cols); // our gradient vector
     }
-    if(flags & MV_FLAG_INPUT){model->input = out;} // stores the input for manager
 
     if(flags & MV_FLAG_INPUT){model->input = out;} // stores the input for manager
     if(flags & MV_FLAG_OUTPUT){model->output = out;} // stores the input for manager
@@ -494,8 +522,9 @@ model_var* _mv_unary_impl(mem_arena* arena, model_context* model,
     if (input->flags & MV_FLAG_REQUIRES_GRAD){
         flags |= MV_FLAG_REQUIRES_GRAD; // also require gradient for future
     }
-    model_var* out = mv_create(arena, model, rows, cols, flags, op);
+    model_var* out = mv_create(arena, model, rows, cols, flags);
     out->inputs[0] = input; // only one input here
+    out-> op = op;
     return out;
 }
 
@@ -506,7 +535,8 @@ model_var* _mv_binary_impl(mem_arena* arena, model_context* model,
     if ((a->flags & MV_FLAG_REQUIRES_GRAD) || (b->flags & MV_FLAG_REQUIRES_GRAD))
     {flags |= MV_FLAG_REQUIRES_GRAD;} // also require gradient for future
 
-    model_var* out = mv_create(arena, model, rows, cols, flags, op);
+    model_var* out = mv_create(arena, model, rows, cols, flags);
+    out->op = op;
     return out;
 }
 
@@ -577,3 +607,110 @@ model_var*  mv_cross_entropy(
                                flags, MV_OP_CROSS_ENTROPY);
 }
 
+
+//out var is who specifies output
+model_program model_prog_create(mem_arena* arena, model_context* model,
+                                model_var* out_var){
+    mem_arena_temp scratch = arena_scratch_get(&arena, 1);
+
+    b8* visited = PUSH_ARRAY(scratch.arena, b8, model->num_vars);
+    
+    u32 stack_size = 0;
+
+    u32 out_size;
+
+    model_var** stack = PUSH_ARRAY(scratch.arena, model_var*, model->num_vars);
+
+    model_var** out = PUSH_ARRAY(scratch.arena, model_var*, model->num_vars);
+    stack[stack_size++] = out_var;
+    
+    while (stack_size > 0){
+        model_var* cur = stack[--stack_size];
+        if(cur->index >= model->num_vars) {continue;} // not possible?
+
+        if( visited[cur->index]){
+            if(out_size < model->num_vars){
+                out[out_size++] = cur;
+            }
+
+            continue;
+        }
+
+        visited[cur->index]= true;
+
+        if (stack_size<model->num_vars){
+            stack[stack_size++] = cur; // add it to the stack, like the visualisation
+        }
+        
+        //expand out curr
+        u32 num_inputs = MV_NUM_INPUTS(cur->op);
+        for(u32 i =0; i< num_inputs; i++){
+            model_var* input = cur->inputs[i];
+            if (input->index >= model->num_vars || visited[input->index]) {
+                continue;  // are these if statements due to loops?
+            }
+            
+            for(u32 j=0; j<stack_size;j++){
+                if (stack[j] == input){
+                    for (u32 k = j; k<stack_size-1;k++){
+                        stack[k] = stack[k+1];
+                    }
+                    stack_size --;
+                }
+            }
+
+
+            stack[stack_size ++ ] = input;
+        }
+    }
+
+    arena_scratch_release(scratch);
+    model_program prog = {
+        .size = out_size,
+        .vars = PUSH_ARRAY_NZ(arena, model_var*, out_size),
+    };
+    memcpy(prog.vars, out, sizeof(model_var*) * out_size);
+    return prog;
+
+}
+
+/* executes our program in the forward direction */
+void model_prog_compute(model_program* prog){
+    for (u32 i =0; i< prog->size; i++){
+        model_var* cur = prog->vars[i];
+
+        model_var* a = cur->inputs[0];
+        model_var* b = cur->inputs[1];
+
+        switch (cur->op){
+            case MV_OP_NULL:
+            case MV_OP_CREATE: break;
+            case _MV_OP_UNARY_START: break;
+            case MV_OP_RELU: {mat_relu(cur->val, a->val);};
+            case MV_OP_SOFTMAX: {mat_softmax(cur->val, a->val);};
+
+            case _MV_OP_BINARY_START: break;
+
+            case MV_OP_ADD: { mat_add(cur->val, a->val, b->val);};
+            case MV_OP_SUB: { mat_sub(cur->val, a->val, b->val);};
+            case MV_OP_MATMUL: { mat_mul(cur->val, a->val, b->val,
+                                         true, false, false);} break;
+            case MV_OP_CROSS_ENTROPY: {
+                mat_cross_entropy(cur->val, a->val, b->val);
+            } break;
+
+        }
+
+    }
+}
+
+
+
+void model_prog_compute_grads(model_program* program);
+
+
+model_context* model_create(mem_arena* arena);
+void model_compile(mem_arena* arena, model_context* model);
+void model_feedfowrads(model_context* context);
+void model_train(model_context* model,
+                 const model_training_desc* training_desc);
