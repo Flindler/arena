@@ -1,3 +1,4 @@
+#include <math.h>
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <stdio.h>
@@ -158,9 +159,17 @@ b32 mat_relu(matrix* out, const matrix* in); //rectified linear unit, 0 if negat
 b32 mat_softmax(matrix* out, const matrix* in);
 b32 mat_cross_entropy(matrix* out, const matrix* p, const matrix* q); // this is our cost funtion
 // takes in some expected probability distribution p and expected distribution q
-b32 mat_relu_add_grad(matrix* out, const matrix* in);
-b32 mat_softmax_add_grad(matrix* out, const matrix* softmax_out);
-b32 mat_cross_entropy_add_grad(matrix* out, const matrix* p, const matrix* q);
+
+
+
+b32 mat_relu_add_grad(matrix* out, const matrix* in, const matrix* grad);
+b32 mat_softmax_add_grad(matrix* out, const matrix* softmax_out, const matrix* grad);
+
+b32 mat_cross_entropy_add_grad(
+    matrix* p_grad, matrix* q_grad,      // Outputs: Where to accumulate the gradients
+    const matrix* p, const matrix* q,    // Inputs: The original values
+    const matrix* grad                   // Upstream: The gradient from the cost node
+);
 
 void draw_mnist_digit(f32* data);
 
@@ -326,7 +335,7 @@ b32 mat_sub(matrix* out, const matrix*a, const matrix* b){
         return false;
     }
 
-    u64 size = sizeof(f32) * (u64)a->rows * a->cols;
+    u64 size = (u64)a->rows * a->cols;
 
 
     for(u64 i=0; i<size; i++){
@@ -444,7 +453,7 @@ b32 mat_softmax(matrix* out, const matrix* in){
 
     f32 sum = 0.0f;
     for (u64 i =0; i< size; i++){
-        out->data[i]=  expf(out->data[i]);
+        out->data[i]=  expf(in->data[i]);
         sum += out->data[i];
     }
     mat_scale(out, 1.0f/sum);
@@ -452,32 +461,94 @@ b32 mat_softmax(matrix* out, const matrix* in){
 }
 
 
-/* loss funtion */
-b32 mat_cross_entropy(matrix* out, const matrix* p, const matrix* q){
-    // size checks
-    if(p->rows != q->rows || p->cols != q->cols){ return false; }
-    else if (out->rows != p->rows || out->cols!=p->cols){ return false; }
-    // p times -log (q) ??
 
+b32 mat_cross_entropy(matrix* out, const matrix* p, const matrix* q) {
+    if (p->rows != q->rows || p->cols != q->cols || out->rows != p->rows || out->cols != p->cols) return false;
     u64 size = (u64)out->rows * out->cols;
-    for (u64 i=0; i<size; i++){
-        // if p->data is 0, set out to 0, else set it to p->data * log(q->data)
-        out->data[i] = p->data[i] == 0.0f
-            ? 0.0f : p->data[i] * -logf(q->data[i]);
+    for (u64 i = 0; i < size; i++) {
+        // Clamp q to avoid log(0) while preserving high penalty
+        float q_val = q->data[i] < 1e-7f ? 1e-7f : q->data[i]; 
+        out->data[i] = -p->data[i] * logf(q_val);
     }
     return true;
 }
 
 
-b32 mat_relu_add_grad(matrix* out, const matrix* in){
+b32 mat_relu_add_grad(matrix* out, const matrix* in, const matrix* grad){
+     if (out->rows != in->rows || out->cols != in->cols){
+        return false;
+    }
+
+     if (out->rows != grad->rows || out->cols != grad->cols){
+        return false;
+    }
+
+    u64 size = (u64)out->rows * out->cols;
+    for(u64 i =0; i<size; i++){
+        out->data[i] += in->data[i] >= 0.0f ? grad->data[i] : 0.0f;
+
+    }
     return true;
 }
 
 
-b32 mat_softmax_add_grad(matrix* out, const matrix* softmax_out);
+
+b32 mat_softmax_add_grad(matrix* out, const matrix* softmax_out,
+                         const matrix* grad){
+    mem_arena_temp scratch = arena_scratch_get(NULL, 0);
+
+    if (softmax_out->rows != 1 && softmax_out->cols!=1){
+        return false;
+    }
+    u32 size = MAX(softmax_out->rows, softmax_out->cols);
+    
+    matrix* jacobian = mat_create(scratch.arena, size, size);
+    for (u32 i=0; i<size; i++){
+        for (u32 j =0; j<size; j++){
+            // just the softmax defintion (which has kronecker delta)
+            jacobian->data[j + i*size] =
+                softmax_out->data[i] *((i==j) - softmax_out->data[j]);
+        }
+    }
+    mat_mul(out, jacobian, grad, false, false, false);
+    arena_scratch_release(scratch);
+
+    return true;
+}
+
+b32 mat_cross_entropy_add_grad(
+    matrix* p_grad, matrix* q_grad,      // Outputs: Where to accumulate the gradients
+    const matrix* p, const matrix* q,    // Inputs: The original values
+    const matrix* grad){
+    if(p->rows != q->rows || p->cols != q->cols){
+        return false;
+    } 
 
 
-b32 mat_cross_entropy_add_grad(matrix* out, const matrix* p, const matrix* q);
+    u64 size = (u64)p->rows * p->cols;
+
+    if (p_grad != NULL){
+        if(p->rows != p_grad->rows || p->cols != p_grad->cols){
+            return false;
+        }
+        for (u64 i =0; i< size; i++) {
+            p_grad->data[i] += -logf(q->data[i]) * grad->data[i];
+        }
+
+        if (q_grad != NULL){
+
+            if(q->rows != q_grad->rows || q->cols != p_grad->cols){
+                return false;
+            }
+            for (u64 i = 0; i< size; i++){    
+                q_grad->data[i] += -p->data[i] / q->data[i] * grad->data[i];
+            }
+        }
+    }
+    return true;
+}
+
+
 
 /* worth looking into the apis behind the file reading */
 matrix* mat_load(mem_arena* arena, u32 rows, u32 cols, const char* filename){
@@ -686,13 +757,13 @@ void model_prog_compute(model_program* prog){
             case MV_OP_NULL:
             case MV_OP_CREATE: break;
             case _MV_OP_UNARY_START: break;
-            case MV_OP_RELU: {mat_relu(cur->val, a->val);};
-            case MV_OP_SOFTMAX: {mat_softmax(cur->val, a->val);};
+            case MV_OP_RELU: {mat_relu(cur->val, a->val);}break;
+            case MV_OP_SOFTMAX: {mat_softmax(cur->val, a->val);}break;
 
             case _MV_OP_BINARY_START: break;
 
-            case MV_OP_ADD: { mat_add(cur->val, a->val, b->val);};
-            case MV_OP_SUB: { mat_sub(cur->val, a->val, b->val);};
+            case MV_OP_ADD: { mat_add(cur->val, a->val, b->val);} break;
+            case MV_OP_SUB: { mat_sub(cur->val, a->val, b->val);} break;
             case MV_OP_MATMUL: { mat_mul(cur->val, a->val, b->val,
                                          true, false, false);} break;
             case MV_OP_CROSS_ENTROPY: {
@@ -705,8 +776,111 @@ void model_prog_compute(model_program* prog){
 }
 
 
+void model_prog_compute_grads(model_program* prog){
+    for (u32 i=0; i<prog->size; i++){
+        // iterate through program and zero out grads if we are computing
+        model_var* cur = prog->vars[i];
+        if((cur->flags & MV_FLAG_REQUIRES_GRAD) != MV_FLAG_REQUIRES_GRAD){
+            continue; // cur->flags & ... is a bitmask, checks if grad in flags
+        }
 
-void model_prog_compute_grads(model_program* program);
+        if(cur->flags & MV_FLAG_PARAMETER){
+            continue; // don't compute if not neeeded
+        } 
+        mat_clear(cur->grad);
+
+    }
+
+    mat_fill(prog->vars[prog->size-1]->grad, 1.0f);
+    for (i64 i = (i64)prog->size-1; i>=0; i--){
+    
+        model_var* cur = prog->vars[i];
+
+        model_var* a = cur->inputs[0];
+        model_var* b = cur->inputs[1];
+
+        // if we only have one input, that doesn't need grad, skip
+        u32 num_inputs = MV_NUM_INPUTS(cur->op);
+
+        if (num_inputs == 1 && (a->flags & MV_FLAG_REQUIRES_GRAD) != MV_FLAG_REQUIRES_GRAD){
+            continue;
+        } 
+
+        if (num_inputs == 2 && 
+            (a->flags & MV_FLAG_REQUIRES_GRAD) != MV_FLAG_REQUIRES_GRAD &&
+            (b->flags & MV_FLAG_REQUIRES_GRAD) != MV_FLAG_REQUIRES_GRAD){
+            continue;
+        }
+
+        switch (cur->op){
+            case MV_OP_NULL:
+            case MV_OP_CREATE: break;
+
+            case _MV_OP_UNARY_START: break;
+            case MV_OP_RELU: {
+                mat_relu_add_grad(a->grad, a->val, cur->grad);
+            };
+            case MV_OP_SOFTMAX: {
+                mat_softmax_add_grad(a->grad, cur->val, cur->grad);
+            } break;
+
+            case _MV_OP_BINARY_START: break;
+
+            case MV_OP_ADD: {
+                if(a->flags & MV_FLAG_REQUIRES_GRAD){
+                    mat_add(a->grad, a->grad, cur->grad);
+                } // our gradient doesnt change, so we 
+
+                if(b->flags & MV_FLAG_REQUIRES_GRAD){
+                    mat_add(b->grad, b->grad, cur->grad);
+                }
+            } break;
+
+
+            case MV_OP_SUB: {
+
+                if(a->flags & MV_FLAG_REQUIRES_GRAD){
+                    mat_add(a->grad, a->grad, cur->grad);
+                } // our gradient doesnt change, so we 
+
+                if(b->flags & MV_FLAG_REQUIRES_GRAD){
+                    mat_sub(b->grad, b->grad, cur->grad);
+                }
+            } break; 
+
+            // in this case ORDER MATTERS AND A COMES FIRST. A= l*m B =m*n
+            // cur = l*n. So to get gradient of A, we need cur * B, but for 
+            // compat, B must be traposed. For B, (cur stays) we do A^T * cur
+
+            case MV_OP_MATMUL: {
+
+                if(a->flags & MV_FLAG_REQUIRES_GRAD){
+                 // transpose b, just due to nature of chain rule
+                    mat_mul(a->grad, cur->grad, b->val, false, false, true);
+                }
+
+                if(b->flags & MV_FLAG_REQUIRES_GRAD){
+                    mat_mul(b->grad, a->val, cur->grad, false, true, false);
+                } 
+            } break;
+
+
+            case MV_OP_CROSS_ENTROPY: {
+                model_var* p = a;
+                model_var* q = b;
+                mat_cross_entropy_add_grad(p->grad, q->grad, p->val, q->val,
+                                           cur->grad);
+            } break;
+        }
+    }
+return;
+
+}
+
+
+
+
+
 
 
 model_context* model_create(mem_arena* arena);
@@ -714,3 +888,7 @@ void model_compile(mem_arena* arena, model_context* model);
 void model_feedfowrads(model_context* context);
 void model_train(model_context* model,
                  const model_training_desc* training_desc);
+
+
+
+
