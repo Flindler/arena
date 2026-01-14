@@ -205,6 +205,9 @@ void create_mnist_model(mem_arena* arena, model_context* model);
 
 
 /*  --------------------------- MAIN ----------------------- */
+
+
+
 int main(int argc, char* argv[]) {
 
     mem_arena* perm_arena = arena_create(MiB(500), MiB(500));  
